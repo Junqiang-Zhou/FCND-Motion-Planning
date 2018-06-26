@@ -3,9 +3,12 @@ import time
 import msgpack
 from enum import Enum, auto
 
+import networkx as nx
 import numpy as np
 
-from planning_utils import a_star, heuristic, create_grid
+from planning_utils import a_star_grid, a_star_graph, heuristic, prune_path
+from planning_utils import create_grid, create_grid_and_edges, closest_point
+
 from udacidrone import Drone
 from udacidrone.connection import MavlinkConnection
 from udacidrone.messaging import MsgID
@@ -24,13 +27,14 @@ class States(Enum):
 
 class MotionPlanning(Drone):
 
-    def __init__(self, connection):
+    def __init__(self, planning, connection):
         super().__init__(connection)
 
         self.target_position = np.array([0.0, 0.0, 0.0])
         self.waypoints = []
         self.in_mission = True
         self.check_state = {}
+        self.planning_option = planning
 
         # initial state
         self.flight_state = States.MANUAL
@@ -120,41 +124,72 @@ class MotionPlanning(Drone):
         self.target_position[2] = TARGET_ALTITUDE
 
         # TODO: read lat0, lon0 from colliders into floating point values
-        
-        # TODO: set home position to (lon0, lat0, 0)
+        with open('colliders.csv') as f:
+            row1 = f.readline().strip().replace(',','').split(' ')
+        home = {row1[0]: float(row1[1]), row1[2]: float(row1[3])}
 
-        # TODO: retrieve current global position
- 
+        # TODO: set home position to (lon0, lat0, 0)
+        self.set_home_position(home['lon0'],  home['lat0'],  0.0)
+
         # TODO: convert to current local position using global_to_local()
-        
+        local_north, local_east, local_down = global_to_local(self.global_position, self.global_home)
+
         print('global home {0}, position {1}, local position {2}'.format(self.global_home, self.global_position,
                                                                          self.local_position))
         # Read in obstacle map
         data = np.loadtxt('colliders.csv', delimiter=',', dtype='Float64', skiprows=2)
-        
-        # Define a grid for a particular altitude and safety margin around obstacles
-        grid, north_offset, east_offset = create_grid(data, TARGET_ALTITUDE, SAFETY_DISTANCE)
+
+        if self.planning_option == 'GRID':
+            print('creating grid...')
+            # Define a grid for a particular altitude and safety margin around obstacles
+            grid, north_offset, east_offset = create_grid(data, TARGET_ALTITUDE, SAFETY_DISTANCE)
+        else:
+            print('creating graph...')
+            grid, edges, north_offset, east_offset = create_grid_and_edges(data, TARGET_ALTITUDE, SAFETY_DISTANCE)
         print("North offset = {0}, east offset = {1}".format(north_offset, east_offset))
+
         # Define starting point on the grid (this is just grid center)
-        grid_start = (-north_offset, -east_offset)
         # TODO: convert start position to current position rather than map center
-        
+        grid_start = (int(local_north-north_offset), int(local_east-east_offset))
+
         # Set goal as some arbitrary position on the grid
-        grid_goal = (-north_offset + 10, -east_offset + 10)
         # TODO: adapt to set goal as latitude / longitude position and convert
+        goal_global = [-122.40196856, 37.79673623, 0.0]
+        goal_north, goal_east, goal_down = global_to_local(goal_global, self.global_home)
+        grid_goal = (int(goal_north-north_offset), int(goal_east-east_offset))
 
         # Run A* to find a path from start to goal
         # TODO: add diagonal motions with a cost of sqrt(2) to your A* implementation
         # or move to a different search space such as a graph (not done here)
         print('Local Start and Goal: ', grid_start, grid_goal)
-        path, _ = a_star(grid, heuristic, grid_start, grid_goal)
-        # TODO: prune path to minimize number of waypoints
-        # TODO (if you're feeling ambitious): Try a different approach altogether!
+        if self.planning_option == 'GRID':
+            # Call A* based on grid search
+            path, _ = a_star_grid(grid, heuristic, grid_start, grid_goal)
+        else:
+            # creating a graph first
+            G = nx.Graph()
+            for e in edges:
+                p1 = e[0]
+                p2 = e[1]
+                dist = np.linalg.norm(np.array(p2) - np.array(p1))
+                G.add_edge(p1, p2, weight=dist)
+            # find nearest from the graph nodes
+            start_ne_g = closest_point(G, grid_start)
+            goal_ne_g = closest_point(G, grid_goal)
+            # Call A* based on graph search
+            path, _ = a_star_graph(G, heuristic, start_ne_g, goal_ne_g)
+            # Append the actual start and goal states to path
+            path = [grid_start] + path + [grid_goal]
 
-        # Convert path to waypoints
-        waypoints = [[p[0] + north_offset, p[1] + east_offset, TARGET_ALTITUDE, 0] for p in path]
+        # TODO: prune path to minimize number of waypoints
+        pruned_path = prune_path(path)
+
+        # Convert path to waypoints(use integer for waypoints)
+        waypoints = [[int(p[0] + north_offset), int(p[1] + east_offset), TARGET_ALTITUDE, 0] for p in pruned_path]
+
         # Set self.waypoints
         self.waypoints = waypoints
+
         # TODO: send waypoints to sim (this is just for visualization of waypoints)
         self.send_waypoints()
 
@@ -175,10 +210,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=5760, help='Port number')
     parser.add_argument('--host', type=str, default='127.0.0.1', help="host address, i.e. '127.0.0.1'")
+    parser.add_argument('--planning', type=str, default='GRID', help="planning options: GRID or GRAPH")
     args = parser.parse_args()
 
     conn = MavlinkConnection('tcp:{0}:{1}'.format(args.host, args.port), timeout=60)
-    drone = MotionPlanning(conn)
+    drone = MotionPlanning(args.planning, conn)
     time.sleep(1)
 
     drone.start()
