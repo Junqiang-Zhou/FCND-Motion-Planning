@@ -56,7 +56,7 @@ To eliminate unnecessary waypoings, check if every three points(p1,p2,3) in the 
 
 Here is an example of planning path for the given environment using grid-based and graph-based A* approaches respectively.
 
-![Quad Image](./planning_examples.png)
+![Quad Image](./misc/planning_examples.png)
 
 ### Execute the flight
 For the grid-based implementation, run:
